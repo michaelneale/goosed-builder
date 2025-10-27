@@ -1,0 +1,136 @@
+name: Build and Release Goosed
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch: # Allow manual trigger
+  push:
+    branches:
+      - main # Also run on pushes to main for testing
+
+jobs:
+  build:
+    name: Build Goosed Binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: goosed-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: goosed-linux-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: goosed-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: goosed-macos-aarch64
+
+    steps:
+      - name: Checkout block/goose
+        uses: actions/checkout@v4
+        with:
+          repository: block/goose
+          ref: main
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build binary
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/goosed artifacts/${{ matrix.artifact_name }}
+          chmod +x artifacts/${{ matrix.artifact_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/${{ matrix.artifact_name }}
+          retention-days: 1
+
+  release:
+    name: Create or Update Latest Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -lah release/
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+
+      - name: Delete existing latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Delete the release if it exists
+          gh release delete latest --repo ${{ github.repository }} --yes || true
+          # Delete the tag if it exists
+          git push --delete origin latest || true
+        continue-on-error: true
+
+      - name: Create new latest release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: latest
+          name: "Latest Goosed Build"
+          body: |
+            # Latest Goosed Binaries
+            
+            Built from [block/goose](https://github.com/block/goose) main branch.
+            
+            **Build Date:** ${{ steps.date.outputs.date }}
+            
+            ## Available Binaries
+            
+            - `goosed-macos-x86_64` - macOS Intel (x86_64)
+            - `goosed-macos-aarch64` - macOS Apple Silicon (ARM64)
+            - `goosed-linux-x86_64` - Linux Intel/AMD (x86_64)
+            - `goosed-linux-aarch64` - Linux ARM64
+            
+            ## Installation
+            
+            Download the appropriate binary for your system, make it executable, and run:
+            
+            ```bash
+            # Example for macOS ARM64
+            curl -L -o goosed https://github.com/${{ github.repository }}/releases/download/latest/goosed-macos-aarch64
+            chmod +x goosed
+            ./goosed
+            ```
+          files: release/*
+          draft: false
+          prerelease: false
